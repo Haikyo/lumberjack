@@ -107,6 +107,9 @@ type Logger struct {
 	// using gzip. The default is not to perform compression.
 	Compress bool `json:"compress" yaml:"compress"`
 
+	// BackupName is used for custom name
+	BackupName func(name, prefix, ext string) (string, error)
+
 	size int64
 	file *os.File
 	mu   sync.Mutex
@@ -218,7 +221,7 @@ func (l *Logger) openNew() error {
 		// Copy the mode off the old logfile.
 		mode = info.Mode()
 		// move the existing file
-		newname := backupName(name, l.LocalTime)
+		newname := l.backupName(name, l.LocalTime)
 		if err := os.Rename(name, newname); err != nil {
 			return fmt.Errorf("can't rename log file: %s", err)
 		}
@@ -244,18 +247,28 @@ func (l *Logger) openNew() error {
 // backupName creates a new filename from the given name, inserting a timestamp
 // between the filename and the extension, using the local time if requested
 // (otherwise UTC).
-func backupName(name string, local bool) string {
+func (l *Logger) backupName(name string, local bool) string {
 	dir := filepath.Dir(name)
 	filename := filepath.Base(name)
 	ext := filepath.Ext(filename)
 	prefix := filename[:len(filename)-len(ext)]
-	t := currentTime()
-	if !local {
-		t = t.UTC()
+
+	var bakName string
+	var err error
+	if l.BackupName != nil {
+		bakName, err = l.BackupName(name, prefix, ext)
 	}
 
-	timestamp := t.Format(backupTimeFormat)
-	return filepath.Join(dir, fmt.Sprintf("%s-%s%s", prefix, timestamp, ext))
+	if err != nil || bakName == "" {
+		t := currentTime()
+		if !local {
+			t = t.UTC()
+		}
+
+		bakName = t.Format(backupTimeFormat)
+	}
+
+	return filepath.Join(dir, fmt.Sprintf("%s-%s%s", prefix, bakName, ext))
 }
 
 // openExistingOrNew opens the logfile if it exists and if the current write
@@ -417,6 +430,9 @@ func (l *Logger) oldLogFiles() ([]logInfo, error) {
 		if t, err := l.timeFromName(f.Name(), prefix, ext+compressSuffix); err == nil {
 			logFiles = append(logFiles, logInfo{t, f})
 			continue
+		}
+		if l.BackupName != nil && strings.Contains(f.Name(), prefix) && strings.Contains(f.Name(), ext) {
+			logFiles = append(logFiles, logInfo{f.ModTime(), f})
 		}
 		// error parsing means that the suffix at the end was not generated
 		// by lumberjack, and therefore it's not a backup file.
